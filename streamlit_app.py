@@ -31,6 +31,37 @@ def get_secret_or_env(name: str, default: str = "") -> str:
         return os.getenv(name, default)
 
 
+def load_databricks_config():
+    """
+    Carga la configuración de Databricks desde Streamlit Secrets
+    o variables de entorno.
+
+    Secrets esperados:
+    - DATABRICKS_HOST
+    - DATABRICKS_TOKEN
+    - GENIE_SPACE_ID
+    """
+    config = {
+        "host": get_secret_or_env("DATABRICKS_HOST"),
+        "token": get_secret_or_env("DATABRICKS_TOKEN"),
+        "space_id": get_secret_or_env("GENIE_SPACE_ID")
+    }
+
+    missing = [
+        key for key, value in config.items()
+        if not value
+    ]
+
+    if missing:
+        st.error(
+            "Faltan variables de conexión en Streamlit Secrets. "
+            "Verifica que existan: DATABRICKS_HOST, DATABRICKS_TOKEN y GENIE_SPACE_ID."
+        )
+        st.stop()
+
+    return config
+
+
 def init_session_state():
     """
     Inicializa las variables de sesión para mantener el historial del chat.
@@ -115,6 +146,42 @@ def to_dict(obj):
         }
 
     return str(obj)
+
+
+def build_genie_prompt(user_prompt: str, deep_thinking: bool) -> str:
+    """
+    Construye el prompt que se enviará a Genie.
+
+    Respuesta rápida:
+        Envía la pregunta casi tal cual.
+
+    Deep thinking:
+        No activa Agent Mode real, pero guía a Genie para responder con
+        más estructura, validación y razonamiento analítico.
+    """
+    if not deep_thinking:
+        return user_prompt
+
+    return f"""
+Actúa como un analista experto en datos de traspasos AFORE.
+
+Tu objetivo es responder la pregunta del usuario con el mayor rigor posible usando la información disponible en el Genie Space.
+
+Antes de responder:
+1. Interpreta cuidadosamente la intención de la pregunta.
+2. Usa la definición de negocio correcta: un traspaso implica una cuenta que ya tenía una AFORE previa y posteriormente se movió a otra AFORE.
+3. Identifica si la pregunta requiere análisis por año, mes, AFORE origen, AFORE destino, ranking, comparación o tendencia.
+4. Si el usuario menciona 2025, prioriza ese año porque es el periodo más confiable para validación.
+5. Si el usuario menciona 2026, considera que puede haber diferencias por actualización o corte de tablas y adviértelo si aplica.
+6. Si generas resultados mensuales, ordénalos cronológicamente.
+7. Si la respuesta puede incluir una tabla, procura estructurarla claramente.
+8. Entrega una respuesta ejecutiva: primero el resultado directo, después una breve interpretación.
+9. Si hay posibles limitaciones de datos, cortes distintos o ambigüedad en la pregunta, menciónalo con claridad.
+10. Evita inventar datos. Si la información no está disponible, indícalo.
+
+Pregunta del usuario:
+{user_prompt}
+""".strip()
 
 
 def extract_text_from_genie_response(response) -> str:
@@ -278,7 +345,7 @@ def ask_genie(
         token=token
     )
 
-    timeout = timedelta(minutes=5)
+    timeout = timedelta(minutes=10)
 
     if st.session_state.conversation_id is None:
         response = client.genie.start_conversation_and_wait(
@@ -335,73 +402,46 @@ def ask_genie(
     }
 
 
-def demo_answer(prompt: str):
-    """
-    Respuesta temporal mientras se consiguen credenciales reales.
-    """
-    return {
-        "text": (
-            "Modo demo activo. Esta respuesta todavía no viene de Genie.\n\n"
-            f"Pregunta recibida: **{prompt}**\n\n"
-            "Cuando conectemos Databricks, aquí aparecerá la respuesta generada "
-            "por el Genie Space de traspasos, junto con tablas o resultados "
-            "cuando la pregunta devuelva información estructurada."
-        ),
-        "sql": [],
-        "dataframes": [],
-        "raw": {}
-    }
-
-
 # ------------------------------------------------------------
 # INTERFAZ
 # ------------------------------------------------------------
 
 init_session_state()
+databricks_config = load_databricks_config()
 
 st.title("💬 Asistente de Traspasos AFORE")
 
 st.write(
-    "Interfaz tipo chatbot para consultar información de traspasos usando "
-    "Databricks Genie. El objetivo es que usuarios no técnicos puedan hacer "
-    "preguntas de negocio sin entrar directamente a Databricks."
+    "Consulta información de traspasos AFORE mediante lenguaje natural. "
+    "Puedes hacer preguntas sobre periodos, AFORE origen, AFORE destino, "
+    "comparativos, tendencias mensuales, rankings y validaciones generales "
+    "sin entrar directamente a Databricks."
 )
 
 with st.sidebar:
-    st.header("Configuración")
+    st.header("Opciones")
 
-    demo_mode = st.toggle(
-        "Usar modo demo",
+    deep_thinking = st.toggle(
+        "Deep thinking",
         value=True,
-        help="Actívalo mientras todavía no tengas token o Genie Space ID."
+        help=(
+            "No activa el Agent Mode real de Genie, pero envía una instrucción "
+            "más completa para buscar respuestas con mayor estructura, validación "
+            "e interpretación."
+        )
     )
 
-    default_host = get_secret_or_env("DATABRICKS_HOST")
-    default_space_id = get_secret_or_env("GENIE_SPACE_ID")
+    if deep_thinking:
+        st.caption("Modo actual: análisis más detallado y contextual.")
+    else:
+        st.caption("Modo actual: respuesta rápida y directa.")
 
-    databricks_host = st.text_input(
-        "Databricks Host",
-        value=default_host,
-        placeholder="https://adb-xxxxxxxx.azuredatabricks.net"
-    )
-
-    databricks_token = st.text_input(
-        "Databricks Token",
-        value="",
-        type="password",
-        placeholder="dapi..."
-    )
-
-    genie_space_id = st.text_input(
-        "Genie Space ID",
-        value=default_space_id,
-        placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    )
+    st.divider()
 
     show_sql = st.toggle(
         "Mostrar SQL generado",
         value=False,
-        help="Útil para validación técnica contra Power BI o queries manuales."
+        help="Útil para validación técnica contra Power BI o consultas manuales."
     )
 
     show_debug = st.toggle(
@@ -417,33 +457,8 @@ with st.sidebar:
         st.rerun()
 
     st.caption(
-        "Para producción, lo ideal es no pedir token al usuario final. "
-        "Conviene usar secrets, variables de entorno, OAuth o service principal."
+        "La conexión con Databricks Genie está configurada por detrás mediante secrets."
     )
-
-
-# ------------------------------------------------------------
-# VALIDACIÓN DE CREDENCIALES
-# ------------------------------------------------------------
-
-if not demo_mode:
-    missing = []
-
-    if not databricks_host:
-        missing.append("Databricks Host")
-
-    if not databricks_token:
-        missing.append("Databricks Token")
-
-    if not genie_space_id:
-        missing.append("Genie Space ID")
-
-    if missing:
-        st.info(
-            "Agrega los siguientes datos para conectar con Genie: "
-            + ", ".join(missing),
-            icon="🗝️"
-        )
 
 
 # ------------------------------------------------------------
@@ -454,8 +469,14 @@ if len(st.session_state.messages) == 0:
     st.session_state.messages.append({
         "role": "assistant",
         "content": (
-            "Hola. Puedes preguntarme sobre traspasos AFORE. "
-            "Por ejemplo: **¿Cuántos traspasos tuvo Profuturo en 2025 por mes?**"
+            "Hola. Soy un asistente para consultar información de **traspasos AFORE**.\n\n"
+            "Puedo ayudarte a responder preguntas como:\n\n"
+            "- ¿Cuántos traspasos tuvo Profuturo en 2025 por mes?\n"
+            "- ¿Qué AFORE recibió más traspasos durante 2025?\n"
+            "- ¿Cuáles fueron las principales AFORE origen hacia Profuturo?\n"
+            "- ¿Cómo se comparan los traspasos entre dos periodos?\n"
+            "- ¿Cuál fue la tendencia mensual de traspasos por AFORE destino?\n\n"
+            "Escribe una pregunta en lenguaje natural y consultaré la información disponible en Genie."
         )
     })
 
@@ -486,17 +507,25 @@ if prompt:
 
     with st.chat_message("assistant"):
         try:
-            with st.spinner("Consultando Genie..."):
-                if demo_mode:
-                    result = demo_answer(prompt)
-                else:
-                    result = ask_genie(
-                        host=databricks_host,
-                        token=databricks_token,
-                        space_id=genie_space_id,
-                        prompt=prompt,
-                        show_sql=show_sql
-                    )
+            genie_prompt = build_genie_prompt(
+                user_prompt=prompt,
+                deep_thinking=deep_thinking
+            )
+
+            spinner_text = (
+                "Consultando Genie con análisis profundo..."
+                if deep_thinking
+                else "Consultando Genie..."
+            )
+
+            with st.spinner(spinner_text):
+                result = ask_genie(
+                    host=databricks_config["host"],
+                    token=databricks_config["token"],
+                    space_id=databricks_config["space_id"],
+                    prompt=genie_prompt,
+                    show_sql=show_sql
+                )
 
             assistant_text = result["text"]
             st.markdown(assistant_text)
@@ -529,11 +558,20 @@ if prompt:
             })
 
         except Exception as e:
-            error_message = (
-                "No pude completar la consulta con Genie. "
-                "Revisa host, token, permisos del Genie Space y acceso al SQL Warehouse.\n\n"
-                f"Detalle técnico: `{e}`"
-            )
+            error_text = str(e)
+
+            if "PENDING_WAREHOUSE" in error_text:
+                error_message = (
+                    "La pregunta sí llegó a Genie, pero el SQL Warehouse no quedó listo a tiempo. "
+                    "Revisa que el warehouse asignado al Genie Space esté encendido y disponible.\n\n"
+                    f"Detalle técnico: `{e}`"
+                )
+            else:
+                error_message = (
+                    "No pude completar la consulta con Genie. "
+                    "Revisa permisos del Genie Space, acceso al SQL Warehouse o disponibilidad de Databricks.\n\n"
+                    f"Detalle técnico: `{e}`"
+                )
 
             st.error(error_message)
 
