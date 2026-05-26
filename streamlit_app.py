@@ -1,6 +1,9 @@
 import os
+import re
+import unicodedata
 import pandas as pd
 import streamlit as st
+import plotly.express as px
 from datetime import timedelta
 from databricks.sdk import WorkspaceClient
 
@@ -26,9 +29,12 @@ def get_secret_or_env(name: str, default: str = "") -> str:
     Esto permite usar la app localmente o desplegarla después.
     """
     try:
-        return st.secrets.get(name, os.getenv(name, default))
+        if name in st.secrets:
+            return st.secrets[name]
     except Exception:
-        return os.getenv(name, default)
+        pass
+
+    return os.getenv(name, default)
 
 
 def load_databricks_config():
@@ -41,25 +47,30 @@ def load_databricks_config():
     - DATABRICKS_TOKEN
     - GENIE_SPACE_ID
     """
-    config = {
-        "host": get_secret_or_env("DATABRICKS_HOST"),
-        "token": get_secret_or_env("DATABRICKS_TOKEN"),
-        "space_id": get_secret_or_env("GENIE_SPACE_ID")
+    raw_config = {
+        "DATABRICKS_HOST": get_secret_or_env("DATABRICKS_HOST"),
+        "DATABRICKS_TOKEN": get_secret_or_env("DATABRICKS_TOKEN"),
+        "GENIE_SPACE_ID": get_secret_or_env("GENIE_SPACE_ID")
     }
 
     missing = [
-        key for key, value in config.items()
+        key for key, value in raw_config.items()
         if not value
     ]
 
     if missing:
         st.error(
-            "Faltan variables de conexión en Streamlit Secrets. "
-            "Verifica que existan: DATABRICKS_HOST, DATABRICKS_TOKEN y GENIE_SPACE_ID."
+            "Faltan variables de conexión en Streamlit Secrets: "
+            + ", ".join(missing)
+            + ". Verifica la configuración de secrets antes de continuar."
         )
         st.stop()
 
-    return config
+    return {
+        "host": raw_config["DATABRICKS_HOST"],
+        "token": raw_config["DATABRICKS_TOKEN"],
+        "space_id": raw_config["GENIE_SPACE_ID"]
+    }
 
 
 def init_session_state():
@@ -178,6 +189,8 @@ Antes de responder:
 8. Entrega una respuesta ejecutiva: primero el resultado directo, después una breve interpretación.
 9. Si hay posibles limitaciones de datos, cortes distintos o ambigüedad en la pregunta, menciónalo con claridad.
 10. Evita inventar datos. Si la información no está disponible, indícalo.
+11. Siempre que sea posible, devuelve los resultados en una estructura tabular clara con columnas bien nombradas para que puedan visualizarse en una gráfica.
+12. Usa nombres de columnas descriptivos, por ejemplo: anio, mes, afore_origen, afore_destino, total_traspasos, participacion, variacion.
 
 Pregunta del usuario:
 {user_prompt}
@@ -322,6 +335,641 @@ def extract_dataframe_from_query_result(query_result):
     return None
 
 
+# ------------------------------------------------------------
+# VISUALIZACIONES AUTOMÁTICAS
+# ------------------------------------------------------------
+
+def normalize_text(text: str) -> str:
+    """
+    Normaliza texto para detectar columnas aunque tengan acentos,
+    mayúsculas o variaciones de nombre.
+    """
+    text = str(text).strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return text
+
+
+def prettify_label(label: str) -> str:
+    """
+    Convierte nombres técnicos de columnas en etiquetas más legibles.
+    """
+    label = str(label).replace("_", " ").strip()
+    label = re.sub(r"\s+", " ", label)
+    return label.title()
+
+
+def format_number(value) -> str:
+    """
+    Da formato ejecutivo a valores numéricos.
+    """
+    try:
+        value = float(value)
+
+        if abs(value) >= 1_000_000:
+            return f"{value:,.0f}"
+
+        if abs(value) >= 1_000:
+            return f"{value:,.0f}"
+
+        if value.is_integer():
+            return f"{value:,.0f}"
+
+        return f"{value:,.2f}"
+
+    except Exception:
+        return str(value)
+
+
+def prepare_dataframe_for_charts(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Prepara el DataFrame para graficar:
+    - limpia nombres de columnas;
+    - intenta convertir columnas numéricas que vienen como texto;
+    - crea una columna temporal si detecta año + mes.
+    """
+    df_chart = df.copy()
+    df_chart.columns = [str(col).strip() for col in df_chart.columns]
+
+    for col in df_chart.columns:
+        if df_chart[col].dtype == "object":
+            raw = df_chart[col].astype(str).str.strip()
+
+            cleaned = (
+                raw
+                .str.replace("$", "", regex=False)
+                .str.replace(",", "", regex=False)
+                .str.replace("%", "", regex=False)
+                .str.replace(" ", "", regex=False)
+            )
+
+            numeric = pd.to_numeric(cleaned, errors="coerce")
+
+            if len(df_chart) > 0 and numeric.notna().mean() >= 0.70:
+                df_chart[col] = numeric
+
+    normalized_cols = {
+        col: normalize_text(col)
+        for col in df_chart.columns
+    }
+
+    year_candidates = [
+        col for col, norm in normalized_cols.items()
+        if norm in ["anio", "ano", "year"]
+    ]
+
+    month_candidates = [
+        col for col, norm in normalized_cols.items()
+        if norm in ["mes", "month"]
+    ]
+
+    month_map = {
+        "enero": 1, "ene": 1, "january": 1, "jan": 1,
+        "febrero": 2, "feb": 2, "february": 2,
+        "marzo": 3, "mar": 3, "march": 3,
+        "abril": 4, "abr": 4, "april": 4, "apr": 4,
+        "mayo": 5, "may": 5,
+        "junio": 6, "jun": 6, "june": 6,
+        "julio": 7, "jul": 7, "july": 7,
+        "agosto": 8, "ago": 8, "august": 8, "aug": 8,
+        "septiembre": 9, "sep": 9, "september": 9, "sept": 9,
+        "octubre": 10, "oct": 10, "october": 10,
+        "noviembre": 11, "nov": 11, "november": 11,
+        "diciembre": 12, "dic": 12, "december": 12, "dec": 12
+    }
+
+    if year_candidates and month_candidates:
+        year_col = year_candidates[0]
+        month_col = month_candidates[0]
+
+        years = pd.to_numeric(df_chart[year_col], errors="coerce")
+
+        if pd.api.types.is_numeric_dtype(df_chart[month_col]):
+            months = pd.to_numeric(df_chart[month_col], errors="coerce")
+        else:
+            months = (
+                df_chart[month_col]
+                .astype(str)
+                .map(lambda x: month_map.get(normalize_text(x), None))
+            )
+
+        period = pd.to_datetime(
+            {
+                "year": years,
+                "month": months,
+                "day": 1
+            },
+            errors="coerce"
+        )
+
+        if len(df_chart) > 0 and period.notna().mean() >= 0.50:
+            df_chart["_periodo_grafico"] = period
+
+    return df_chart
+
+
+def get_numeric_columns(df: pd.DataFrame) -> list[str]:
+    """
+    Devuelve columnas numéricas útiles para graficar.
+    """
+    return [
+        col for col in df.columns
+        if pd.api.types.is_numeric_dtype(df[col])
+        and not str(col).startswith("_")
+    ]
+
+
+def get_categorical_columns(df: pd.DataFrame) -> list[str]:
+    """
+    Devuelve columnas categóricas útiles para graficar.
+    """
+    categorical_cols = []
+
+    for col in df.columns:
+        if str(col).startswith("_"):
+            continue
+
+        if pd.api.types.is_numeric_dtype(df[col]):
+            continue
+
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            continue
+
+        unique_count = df[col].nunique(dropna=True)
+
+        if unique_count >= 1:
+            categorical_cols.append(col)
+
+    return categorical_cols
+
+
+def find_time_column(df: pd.DataFrame):
+    """
+    Detecta una columna temporal para gráficas de tendencia.
+    """
+    if "_periodo_grafico" in df.columns:
+        return "_periodo_grafico"
+
+    for col in df.columns:
+        norm = normalize_text(col)
+
+        if any(keyword in norm for keyword in ["fecha", "periodo", "date"]):
+            parsed = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+
+            if len(df) > 0 and parsed.notna().mean() >= 0.50:
+                df[col] = parsed
+                return col
+
+    for col in df.columns:
+        norm = normalize_text(col)
+
+        if norm in ["anio", "ano", "year"] and pd.api.types.is_numeric_dtype(df[col]):
+            return col
+
+        if norm in ["mes", "month"] and pd.api.types.is_numeric_dtype(df[col]):
+            return col
+
+    return None
+
+
+def choose_measure_column(numeric_cols: list[str]) -> str | None:
+    """
+    Elige la métrica principal a graficar.
+    Prioriza columnas que suenan a total, conteo o traspasos.
+    """
+    if not numeric_cols:
+        return None
+
+    priority_keywords = [
+        "traspaso",
+        "total",
+        "conteo",
+        "cantidad",
+        "count",
+        "registros",
+        "cuentas",
+        "volumen",
+        "participacion",
+        "porcentaje",
+        "share",
+        "monto",
+        "saldo",
+        "promedio",
+        "variacion"
+    ]
+
+    for keyword in priority_keywords:
+        for col in numeric_cols:
+            if keyword in normalize_text(col):
+                return col
+
+    return numeric_cols[0]
+
+
+def choose_category_column(
+    df: pd.DataFrame,
+    categorical_cols: list[str],
+    max_categories: int = 30
+) -> str | None:
+    """
+    Elige la mejor columna categórica para barras/rankings.
+    """
+    if not categorical_cols:
+        return None
+
+    priority_keywords = [
+        "afore_destino",
+        "destino",
+        "afore_origen",
+        "origen",
+        "afore",
+        "administradora",
+        "grupo",
+        "categoria",
+        "segmento"
+    ]
+
+    valid_cols = [
+        col for col in categorical_cols
+        if df[col].nunique(dropna=True) <= max_categories
+    ]
+
+    if not valid_cols:
+        return None
+
+    for keyword in priority_keywords:
+        for col in valid_cols:
+            if keyword in normalize_text(col):
+                return col
+
+    return valid_cols[0]
+
+
+def sort_for_chart(df: pd.DataFrame, x_col: str) -> pd.DataFrame:
+    """
+    Ordena el DataFrame de forma útil para graficar.
+    """
+    df_sorted = df.copy()
+
+    if x_col == "_periodo_grafico":
+        return df_sorted.sort_values(x_col)
+
+    if pd.api.types.is_datetime64_any_dtype(df_sorted[x_col]):
+        return df_sorted.sort_values(x_col)
+
+    if pd.api.types.is_numeric_dtype(df_sorted[x_col]):
+        return df_sorted.sort_values(x_col)
+
+    month_order = {
+        "enero": 1, "ene": 1,
+        "febrero": 2, "feb": 2,
+        "marzo": 3, "mar": 3,
+        "abril": 4, "abr": 4,
+        "mayo": 5,
+        "junio": 6, "jun": 6,
+        "julio": 7, "jul": 7,
+        "agosto": 8, "ago": 8,
+        "septiembre": 9, "sep": 9,
+        "octubre": 10, "oct": 10,
+        "noviembre": 11, "nov": 11,
+        "diciembre": 12, "dic": 12
+    }
+
+    if normalize_text(x_col) in ["mes", "month"]:
+        df_sorted["_orden_mes"] = (
+            df_sorted[x_col]
+            .astype(str)
+            .map(lambda x: month_order.get(normalize_text(x), None))
+        )
+
+        if df_sorted["_orden_mes"].notna().any():
+            return df_sorted.sort_values("_orden_mes").drop(columns=["_orden_mes"])
+
+    return df_sorted
+
+
+def style_plotly_figure(fig, title: str):
+    """
+    Aplica estilo visual consistente a las gráficas.
+    """
+    fig.update_layout(
+        title={
+            "text": title,
+            "x": 0.02,
+            "xanchor": "left"
+        },
+        template="plotly_white",
+        height=460,
+        margin=dict(l=20, r=20, t=70, b=40),
+        font=dict(size=13),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        hovermode="x unified"
+    )
+
+    fig.update_xaxes(
+        showgrid=True,
+        gridwidth=1,
+        gridcolor="rgba(0,0,0,0.08)"
+    )
+
+    fig.update_yaxes(
+        showgrid=True,
+        gridwidth=1,
+        gridcolor="rgba(0,0,0,0.08)"
+    )
+
+    return fig
+
+
+def render_kpi_cards(df: pd.DataFrame, numeric_cols: list[str]):
+    """
+    Muestra KPIs cuando la respuesta trae un solo registro.
+    """
+    display_cols = numeric_cols[:4]
+
+    if not display_cols:
+        return
+
+    st.subheader("Resumen visual")
+
+    cols = st.columns(len(display_cols))
+
+    for idx, metric_col in enumerate(display_cols):
+        value = df.iloc[0][metric_col]
+
+        with cols[idx]:
+            st.metric(
+                label=prettify_label(metric_col),
+                value=format_number(value)
+            )
+
+
+def render_heatmap_if_possible(df: pd.DataFrame, value_col: str):
+    """
+    Genera heatmap cuando detecta un cruce tipo origen/destino.
+    """
+    cols = df.columns.tolist()
+
+    origin_col = None
+    destination_col = None
+
+    for col in cols:
+        norm = normalize_text(col)
+
+        if "origen" in norm and origin_col is None:
+            origin_col = col
+
+        if "destino" in norm and destination_col is None:
+            destination_col = col
+
+    if not origin_col or not destination_col:
+        return False
+
+    if df[origin_col].nunique(dropna=True) > 30:
+        return False
+
+    if df[destination_col].nunique(dropna=True) > 30:
+        return False
+
+    pivot = df.pivot_table(
+        index=origin_col,
+        columns=destination_col,
+        values=value_col,
+        aggfunc="sum",
+        fill_value=0
+    )
+
+    if pivot.empty:
+        return False
+
+    fig = px.imshow(
+        pivot,
+        text_auto=True,
+        aspect="auto",
+        labels=dict(
+            x=prettify_label(destination_col),
+            y=prettify_label(origin_col),
+            color=prettify_label(value_col)
+        )
+    )
+
+    fig = style_plotly_figure(
+        fig,
+        title=f"Cruce de {prettify_label(origin_col)} vs {prettify_label(destination_col)}"
+    )
+
+    st.subheader("Visualización")
+    st.plotly_chart(fig, use_container_width=True)
+
+    return True
+
+
+def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
+    """
+    Genera una visualización automática según la estructura de la tabla.
+
+    Tipos soportados:
+    - KPIs
+    - línea temporal
+    - barras/ranking
+    - dona
+    - heatmap origen/destino
+    - scatter
+    - histograma
+    """
+    if df is None or df.empty:
+        return
+
+    df_chart = prepare_dataframe_for_charts(df)
+
+    numeric_cols = get_numeric_columns(df_chart)
+    categorical_cols = get_categorical_columns(df_chart)
+    time_col = find_time_column(df_chart)
+    value_col = choose_measure_column(numeric_cols)
+
+    if not numeric_cols or value_col is None:
+        st.info("La respuesta no contiene columnas numéricas suficientes para generar una gráfica.")
+        return
+
+    if len(df_chart) == 1:
+        render_kpi_cards(df_chart, numeric_cols)
+        return
+
+    # Heatmap para cruces origen/destino.
+    if render_heatmap_if_possible(df_chart, value_col):
+        return
+
+    # Tendencia temporal.
+    if time_col:
+        color_col = None
+
+        for col in categorical_cols:
+            unique_count = df_chart[col].nunique(dropna=True)
+
+            if 1 < unique_count <= 12:
+                if any(
+                    keyword in normalize_text(col)
+                    for keyword in ["afore", "origen", "destino", "grupo", "categoria"]
+                ):
+                    color_col = col
+                    break
+
+        plot_df = sort_for_chart(df_chart, time_col)
+
+        labels = {
+            time_col: "Periodo" if time_col == "_periodo_grafico" else prettify_label(time_col),
+            value_col: prettify_label(value_col)
+        }
+
+        if color_col:
+            labels[color_col] = prettify_label(color_col)
+
+        fig = px.line(
+            plot_df,
+            x=time_col,
+            y=value_col,
+            color=color_col,
+            markers=True,
+            labels=labels
+        )
+
+        fig = style_plotly_figure(
+            fig,
+            title=f"Tendencia de {prettify_label(value_col)}"
+        )
+
+        st.subheader("Visualización")
+        st.plotly_chart(fig, use_container_width=True)
+        return
+
+    # Dona para participaciones o porcentajes.
+    category_col = choose_category_column(df_chart, categorical_cols)
+
+    if category_col:
+        category_count = df_chart[category_col].nunique(dropna=True)
+        value_norm = normalize_text(value_col)
+
+        if category_count <= 8 and any(
+            keyword in value_norm
+            for keyword in ["participacion", "porcentaje", "share", "pct"]
+        ):
+            fig = px.pie(
+                df_chart,
+                names=category_col,
+                values=value_col,
+                hole=0.45,
+                labels={
+                    category_col: prettify_label(category_col),
+                    value_col: prettify_label(value_col)
+                }
+            )
+
+            fig = style_plotly_figure(
+                fig,
+                title=f"Distribución de {prettify_label(value_col)}"
+            )
+
+            fig.update_traces(
+                textposition="inside",
+                textinfo="percent+label"
+            )
+
+            st.subheader("Visualización")
+            st.plotly_chart(fig, use_container_width=True)
+            return
+
+        # Barras horizontales para rankings o categorías.
+        bar_df = (
+            df_chart[[category_col, value_col]]
+            .dropna()
+            .groupby(category_col, as_index=False)[value_col]
+            .sum()
+            .sort_values(value_col, ascending=False)
+            .head(20)
+        )
+
+        bar_df = bar_df.sort_values(value_col, ascending=True)
+
+        fig = px.bar(
+            bar_df,
+            x=value_col,
+            y=category_col,
+            orientation="h",
+            text=value_col,
+            labels={
+                category_col: prettify_label(category_col),
+                value_col: prettify_label(value_col)
+            }
+        )
+
+        fig.update_traces(
+            texttemplate="%{text:,.0f}",
+            textposition="outside",
+            cliponaxis=False
+        )
+
+        fig = style_plotly_figure(
+            fig,
+            title=f"Ranking por {prettify_label(value_col)}"
+        )
+
+        st.subheader("Visualización")
+        st.plotly_chart(fig, use_container_width=True)
+        return
+
+    # Scatter cuando hay dos métricas numéricas.
+    if len(numeric_cols) >= 2:
+        x_col = numeric_cols[0]
+        y_col = numeric_cols[1]
+
+        fig = px.scatter(
+            df_chart,
+            x=x_col,
+            y=y_col,
+            size=value_col if value_col not in [x_col, y_col] else None,
+            labels={
+                x_col: prettify_label(x_col),
+                y_col: prettify_label(y_col)
+            }
+        )
+
+        fig = style_plotly_figure(
+            fig,
+            title=f"Relación entre {prettify_label(x_col)} y {prettify_label(y_col)}"
+        )
+
+        st.subheader("Visualización")
+        st.plotly_chart(fig, use_container_width=True)
+        return
+
+    # Fallback: histograma.
+    fig = px.histogram(
+        df_chart,
+        x=value_col,
+        labels={
+            value_col: prettify_label(value_col)
+        }
+    )
+
+    fig = style_plotly_figure(
+        fig,
+        title=f"Distribución de {prettify_label(value_col)}"
+    )
+
+    st.subheader("Visualización")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ------------------------------------------------------------
+# CONEXIÓN CON GENIE
+# ------------------------------------------------------------
+
 def ask_genie(
     host: str,
     token: str,
@@ -436,6 +1084,15 @@ with st.sidebar:
     else:
         st.caption("Modo actual: respuesta rápida y directa.")
 
+    show_charts = st.toggle(
+        "Mostrar visualizaciones automáticas",
+        value=True,
+        help=(
+            "Genera gráficos automáticamente cuando Genie devuelve resultados tabulares. "
+            "La app elige el tipo de visualización según las columnas de la respuesta."
+        )
+    )
+
     st.divider()
 
     show_sql = st.toggle(
@@ -475,8 +1132,9 @@ if len(st.session_state.messages) == 0:
             "- ¿Qué AFORE recibió más traspasos durante 2025?\n"
             "- ¿Cuáles fueron las principales AFORE origen hacia Profuturo?\n"
             "- ¿Cómo se comparan los traspasos entre dos periodos?\n"
-            "- ¿Cuál fue la tendencia mensual de traspasos por AFORE destino?\n\n"
-            "Escribe una pregunta en lenguaje natural y consultaré la información disponible en Genie."
+            "- ¿Cuál fue la tendencia mensual de traspasos por AFORE destino?\n"
+            "- ¿Qué AFORE tuvo mayor participación en los traspasos recibidos?\n\n"
+            "Cuando la respuesta incluya datos tabulares, también intentaré generar una visualización automática para facilitar el análisis."
         )
     })
 
@@ -532,16 +1190,20 @@ if prompt:
 
             if result["dataframes"]:
                 for idx, df in enumerate(result["dataframes"], start=1):
-                    st.subheader(f"Resultado tabular {idx}")
-                    st.dataframe(df, use_container_width=True)
 
-                    csv = df.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label=f"Descargar resultado {idx} en CSV",
-                        data=csv,
-                        file_name=f"resultado_genie_{idx}.csv",
-                        mime="text/csv"
-                    )
+                    if show_charts:
+                        render_smart_visualization(df, chart_index=idx)
+
+                    with st.expander(f"Ver tabla de resultados {idx}", expanded=True):
+                        st.dataframe(df, use_container_width=True)
+
+                        csv = df.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            label=f"Descargar resultado {idx} en CSV",
+                            data=csv,
+                            file_name=f"resultado_genie_{idx}.csv",
+                            mime="text/csv"
+                        )
 
             if show_sql and result["sql"]:
                 with st.expander("SQL generado por Genie"):
