@@ -385,29 +385,51 @@ def prepare_dataframe_for_charts(df: pd.DataFrame) -> pd.DataFrame:
     """
     Prepara el DataFrame para graficar:
     - limpia nombres de columnas;
-    - intenta convertir columnas numéricas que vienen como texto;
+    - convierte columnas numéricas aunque vengan como texto/string/decimal;
+    - convierte fechas ISO como 2025-03-01T00:00:00.000Z;
     - crea una columna temporal si detecta año + mes.
     """
     df_chart = df.copy()
     df_chart.columns = [str(col).strip() for col in df_chart.columns]
 
+    # 1. Intentar convertir columnas tipo fecha.
     for col in df_chart.columns:
-        if df_chart[col].dtype == "object":
-            raw = df_chart[col].astype(str).str.strip()
+        norm = normalize_text(col)
 
-            cleaned = (
-                raw
-                .str.replace("$", "", regex=False)
-                .str.replace(",", "", regex=False)
-                .str.replace("%", "", regex=False)
-                .str.replace(" ", "", regex=False)
+        if any(keyword in norm for keyword in ["fecha", "periodo", "mes", "date"]):
+            parsed_dates = pd.to_datetime(
+                df_chart[col],
+                errors="coerce",
+                utc=True
             )
 
-            numeric = pd.to_numeric(cleaned, errors="coerce")
+            if len(df_chart) > 0 and parsed_dates.notna().mean() >= 0.50:
+                df_chart[col] = parsed_dates.dt.tz_convert(None)
 
-            if len(df_chart) > 0 and numeric.notna().mean() >= 0.70:
-                df_chart[col] = numeric
+    # 2. Intentar convertir cualquier columna no-fecha a numérica.
+    for col in df_chart.columns:
+        if pd.api.types.is_datetime64_any_dtype(df_chart[col]):
+            continue
 
+        if pd.api.types.is_numeric_dtype(df_chart[col]):
+            continue
+
+        raw = df_chart[col].astype(str).str.strip()
+
+        cleaned = (
+            raw
+            .str.replace("$", "", regex=False)
+            .str.replace(",", "", regex=False)
+            .str.replace("%", "", regex=False)
+            .str.replace(" ", "", regex=False)
+        )
+
+        numeric = pd.to_numeric(cleaned, errors="coerce")
+
+        if len(df_chart) > 0 and numeric.notna().mean() >= 0.70:
+            df_chart[col] = numeric
+
+    # 3. Detectar columnas de año y mes para crear periodo graficable.
     normalized_cols = {
         col: normalize_text(col)
         for col in df_chart.columns
@@ -511,13 +533,17 @@ def find_time_column(df: pd.DataFrame):
         return "_periodo_grafico"
 
     for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            return col
+
+    for col in df.columns:
         norm = normalize_text(col)
 
-        if any(keyword in norm for keyword in ["fecha", "periodo", "date"]):
-            parsed = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+        if any(keyword in norm for keyword in ["fecha", "periodo", "date", "mes"]):
+            parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
 
             if len(df) > 0 and parsed.notna().mean() >= 0.50:
-                df[col] = parsed
+                df[col] = parsed.dt.tz_convert(None)
                 return col
 
     for col in df.columns:
