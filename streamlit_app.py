@@ -658,6 +658,35 @@ def format_month_number(value):
     except Exception:
         return value
 
+def is_year_column(series: pd.Series, column_name: str) -> bool:
+    """
+    Detecta columnas de año para evitar formatearlas como número con comas
+    y para evitar que Plotly las trate como eje continuo.
+    """
+    norm = normalize_text(column_name)
+
+    if norm not in ["anio", "ano", "año", "year"]:
+        return False
+
+    numeric = pd.to_numeric(series, errors="coerce")
+
+    if len(series) == 0:
+        return False
+
+    return numeric.notna().mean() >= 0.70 and numeric.dropna().between(1900, 2100).all()
+
+
+def format_year_value(value):
+    """
+    Formatea años como 2024, no como 2,024.
+    """
+    if pd.isna(value):
+        return ""
+
+    try:
+        return str(int(float(value)))
+    except Exception:
+        return str(value)
 
 def is_date_like_column(series: pd.Series, column_name: str) -> bool:
     """
@@ -830,17 +859,22 @@ def prepare_dataframe_for_display(df: pd.DataFrame, hide_technical_codes: bool =
     if columns_to_drop:
         display_df = display_df.drop(columns=columns_to_drop, errors="ignore")
 
-    # 2. Formatear meses numéricos.
+    # 2. Formatear años.
+    for col in list(display_df.columns):
+        if is_year_column(display_df[col], col):
+            display_df[col] = display_df[col].apply(format_year_value)
+
+    # 3. Formatear meses numéricos.
     for col in list(display_df.columns):
         if is_month_number_column(display_df[col], col):
             display_df[col] = display_df[col].apply(format_month_number)
-
-    # 3. Formatear fechas.
+    
+    # 4. Formatear fechas.
     for col in list(display_df.columns):
         if is_date_like_column(display_df[col], col):
             display_df[col] = display_df[col].apply(lambda x: format_date_es(x, col))
 
-    # 4. Formatear numéricos.
+    # 5. Formatear numéricos.
     for col in list(display_df.columns):
         if pd.api.types.is_numeric_dtype(display_df[col]):
             display_df[col] = display_df[col].apply(lambda x: format_numeric_for_display(x, col))
@@ -860,7 +894,7 @@ def prepare_dataframe_for_display(df: pd.DataFrame, hide_technical_codes: bool =
             if len(display_df) > 0 and numeric.notna().mean() >= 0.70:
                 display_df[col] = numeric.apply(lambda x: format_numeric_for_display(x, col))
 
-    # 5. Renombrar encabezados.
+    # 6. Renombrar encabezados.
     rename_map = {
         col: prettify_table_column_name(col)
         for col in display_df.columns
@@ -868,7 +902,7 @@ def prepare_dataframe_for_display(df: pd.DataFrame, hide_technical_codes: bool =
 
     display_df = display_df.rename(columns=rename_map)
 
-    # 6. Reordenar columnas importantes al inicio.
+    # 7. Reordenar columnas importantes al inicio.
     priority_cols = [
         col for col in display_df.columns
         if normalize_text(col) in [
@@ -1197,14 +1231,18 @@ def prepare_dataframe_for_charts(df: pd.DataFrame) -> pd.DataFrame:
 def get_numeric_columns(df: pd.DataFrame) -> list[str]:
     """
     Devuelve columnas numéricas útiles para graficar.
-    Excluye claves/códigos que no deben interpretarse como métricas.
+    Excluye claves/códigos y años, porque no deben interpretarse como métricas.
     """
     excluded_keywords = [
         "cve",
         "clave",
         "id",
         "codigo",
-        "code"
+        "code",
+        "anio",
+        "ano",
+        "año",
+        "year"
     ]
 
     numeric_cols = []
@@ -1222,7 +1260,6 @@ def get_numeric_columns(df: pd.DataFrame) -> list[str]:
             numeric_cols.append(col)
 
     return numeric_cols
-
 
 def get_categorical_columns(df: pd.DataFrame) -> list[str]:
     """
@@ -1623,17 +1660,24 @@ def render_smart_visualization(df: pd.DataFrame, chart_key: str):
 
         plot_df = sort_for_chart(df_chart, time_col)
 
+        x_col = time_col
+        
+        # Si el eje temporal es año, convertirlo a texto para evitar ticks tipo 2024.2.
+        if is_year_column(plot_df[time_col], time_col):
+            x_col = "_anio_label"
+            plot_df[x_col] = plot_df[time_col].apply(format_year_value)
+        
         labels = {
-            time_col: "Periodo" if time_col == "_periodo_grafico" else prettify_label(time_col),
+            x_col: "Año" if x_col == "_anio_label" else ("Periodo" if time_col == "_periodo_grafico" else prettify_label(time_col)),
             value_col: prettify_label(value_col)
         }
-
+        
         if color_col:
             labels[color_col] = prettify_label(color_col)
-
+        
         fig = px.line(
             plot_df,
-            x=time_col,
+            x=x_col,
             y=value_col,
             color=color_col,
             markers=True,
@@ -1642,6 +1686,8 @@ def render_smart_visualization(df: pd.DataFrame, chart_key: str):
         )
 
         fig.update_traces(line=dict(width=3), marker=dict(size=8))
+        if x_col == "_anio_label":
+            fig.update_xaxes(type="category")
 
         fig = style_plotly_figure(
             fig,
