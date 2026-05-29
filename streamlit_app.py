@@ -26,7 +26,7 @@ st.set_page_config(
 # CONSTANTES VISUALES PROFUTURO
 # ------------------------------------------------------------
 
-LOGO_PATH = "assets/profuturo_logo_horizontal.png"
+LOGO_PATH = "assets/profuturo_horizontal_logo.png"
 ICON_PATH = "assets/profuturo_logo.png"
 
 PROFUTURO_COLORS = {
