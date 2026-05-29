@@ -560,6 +560,37 @@ def prettify_afore_text(text: str) -> str:
 
     return enriched_text
 
+def clean_markdown_artifacts(text: str) -> str:
+    """
+    Limpia artefactos comunes de Markdown que pueden venir desde Genie.
+    Mantiene el texto legible y evita cambios raros de tipografía.
+    """
+    if not text:
+        return text
+
+    cleaned = text
+
+    # Elimina itálicas simples tipo *texto*, pero conserva negritas tipo **texto**.
+    cleaned = re.sub(
+        r"(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)",
+        r"\1",
+        cleaned
+    )
+
+    # Elimina underscores usados como itálicas simples: _texto_.
+    cleaned = re.sub(
+        r"(?<!_)_(?!_)([^_\n]+?)(?<!_)_(?!_)",
+        r"\1",
+        cleaned
+    )
+
+    # Limpia espacios raros antes de signos de puntuación.
+    cleaned = re.sub(r"\s+([,.:%])", r"\1", cleaned)
+
+    # Asegura espacio entre números y palabras cuando vengan pegados.
+    cleaned = re.sub(r"(\d)([A-Za-zÁÉÍÓÚáéíóúÑñ])", r"\1 \2", cleaned)
+
+    return cleaned
 
 def format_date_es(value, column_name: str = ""):
     """
@@ -2156,7 +2187,9 @@ if prompt:
                     show_sql=show_sql
                 )
 
-            assistant_text = prettify_afore_text(result["text"])
+            assistant_text = clean_markdown_artifacts(
+                prettify_afore_text(result["text"])
+            )
 
             enriched_dataframes = [
                 enrich_afore_columns(df)
