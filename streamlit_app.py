@@ -174,23 +174,28 @@ def build_genie_prompt(user_prompt: str, deep_thinking: bool) -> str:
         return user_prompt
 
     return f"""
-Actúa como un analista experto en datos de traspasos AFORE.
+Actúa como un analista experto en datos de traspasos AFORE usando el contexto, instrucciones, SQL Expressions y SQL Queries validadas que ya existen dentro de este Genie Space.
 
-Tu objetivo es responder la pregunta del usuario con el mayor rigor posible usando la información disponible en el Genie Space.
+Antes de responder, revisa si la pregunta del usuario se parece a alguno de los ejemplos SQL validados o patrones de respuesta definidos en las instrucciones del Space. Si existe una coincidencia o una pregunta similar, usa ese ejemplo como referencia principal para construir la consulta y la respuesta.
 
-Antes de responder:
-1. Interpreta cuidadosamente la intención de la pregunta.
-2. Usa la definición de negocio correcta: un traspaso implica una cuenta que ya tenía una AFORE previa y posteriormente se movió a otra AFORE.
-3. Identifica si la pregunta requiere análisis por año, mes, AFORE origen, AFORE destino, ranking, comparación o tendencia.
-4. Si el usuario menciona 2025, prioriza ese año porque es el periodo más confiable para validación.
-5. Si el usuario menciona 2026, considera que puede haber diferencias por actualización o corte de tablas y adviértelo si aplica.
-6. Si generas resultados mensuales, ordénalos cronológicamente.
-7. Si la respuesta puede incluir una tabla, procura estructurarla claramente.
-8. Entrega una respuesta ejecutiva: primero el resultado directo, después una breve interpretación.
-9. Si hay posibles limitaciones de datos, cortes distintos o ambigüedad en la pregunta, menciónalo con claridad.
-10. Evita inventar datos. Si la información no está disponible, indícalo.
-11. Siempre que sea posible, devuelve los resultados en una estructura tabular clara con columnas bien nombradas para que puedan visualizarse en una gráfica.
-12. Usa nombres de columnas descriptivos, por ejemplo: anio, mes, afore_origen, afore_destino, total_traspasos, participacion, variacion.
+Prioriza la lógica ya documentada en el Genie Space sobre inferencias generales. En especial:
+1. Usa las definiciones de negocio, métricas y filtros ya configurados en las instrucciones y SQL Expressions.
+2. Apóyate en los SQL Queries validados como guía para resolver preguntas similares.
+3. Respeta la diferencia entre traspasos recibidos/IN y traspasos cedidos/OUT.
+4. Si el usuario pregunta por una AFORE sin especificar origen o destino, interpreta por defecto que se refiere a traspasos recibidos, salvo que use términos como cedidos, salientes, perdidos, OUT, origen o desde.
+5. Si la pregunta involucra Profuturo, identifica claramente si debe tratarse como AFORE destino, AFORE origen o entidad de comparación.
+6. Para análisis mensuales, ordena los resultados cronológicamente.
+7. Para comparativos, usa periodos equivalentes y explica claramente contra qué se está comparando.
+8. Si la pregunta puede responderse con una tabla, devuelve resultados estructurados con columnas claras y nombres descriptivos.
+9. Si hay ambigüedad, responde indicando el supuesto utilizado en lugar de inventar una interpretación.
+10. Evita inventar datos o definiciones fuera del contexto configurado en el Space.
+
+Entrega la respuesta en formato ejecutivo:
+- Primero da el resultado directo.
+- Después incluye una breve interpretación.
+- Si aplica, menciona cualquier supuesto usado.
+- Si aplica, devuelve una tabla que facilite la visualización en Streamlit.
+- Si aplica, agrega la visualización (gráfica) de la respuesta a la pregunta.
 
 Pregunta del usuario:
 {user_prompt}
