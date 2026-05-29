@@ -1461,8 +1461,6 @@ init_session_state()
 databricks_config = load_databricks_config()
 
 with st.sidebar:
-    if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, width=132)
 
     st.markdown("### Centro de control")
     st.caption("Configura cómo quieres consultar y visualizar la información.")
