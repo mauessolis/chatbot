@@ -1,10 +1,12 @@
 import os
 import re
+import uuid
+import json
 import unicodedata
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-from datetime import timedelta
+from datetime import datetime, timedelta
 from databricks.sdk import WorkspaceClient
 
 
@@ -15,8 +17,208 @@ from databricks.sdk import WorkspaceClient
 st.set_page_config(
     page_title="Asistente de Traspasos AFORE",
     page_icon="💬",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+
+# ------------------------------------------------------------
+# CONSTANTES VISUALES PROFUTURO
+# ------------------------------------------------------------
+
+LOGO_PATH = "assets/profuturo_logo.png"
+
+PROFUTURO_COLORS = {
+    "blue": "#004B8D",
+    "dark_blue": "#002B5C",
+    "deep_blue": "#003B73",
+    "light_blue": "#00A6D6",
+    "gold": "#F6B221",
+    "orange": "#F28C28",
+    "gray": "#6B7280",
+    "light_gray": "#F3F6FA",
+    "white": "#FFFFFF",
+    "text": "#1A1A1A"
+}
+
+PROFUTURO_COLOR_SEQUENCE = [
+    PROFUTURO_COLORS["blue"],
+    PROFUTURO_COLORS["gold"],
+    PROFUTURO_COLORS["light_blue"],
+    PROFUTURO_COLORS["orange"],
+    PROFUTURO_COLORS["dark_blue"],
+    PROFUTURO_COLORS["gray"]
+]
+
+
+# ------------------------------------------------------------
+# LOGO STREAMLIT
+# ------------------------------------------------------------
+
+if os.path.exists(LOGO_PATH):
+    try:
+        st.logo(
+            LOGO_PATH,
+            size="large",
+            icon_image=LOGO_PATH
+        )
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------
+# FUNCIONES DE ESTILO VISUAL
+# ------------------------------------------------------------
+
+def inject_profuturo_theme():
+    """
+    Inyecta estilos CSS para que la app se sienta como una herramienta interna
+    de Profuturo y no como un template genérico de Streamlit.
+    """
+    st.markdown(
+        """
+        <style>
+        :root {
+            --profuturo-blue: #004B8D;
+            --profuturo-dark-blue: #002B5C;
+            --profuturo-deep-blue: #003B73;
+            --profuturo-gold: #F6B221;
+            --profuturo-bg: #F7F9FC;
+        }
+
+        .block-container {
+            padding-top: 1.2rem;
+            padding-bottom: 3rem;
+            max-width: 1280px;
+        }
+
+        .profuturo-header {
+            background: linear-gradient(135deg, #003B73 0%, #004B8D 62%, #006CB8 100%);
+            padding: 28px 32px;
+            border-radius: 22px;
+            color: white;
+            margin-bottom: 22px;
+            box-shadow: 0 14px 34px rgba(0, 43, 92, 0.22);
+            border: 1px solid rgba(255,255,255,0.14);
+        }
+
+        .profuturo-eyebrow {
+            color: #F6B221;
+            font-size: 0.86rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .profuturo-title {
+            font-size: 2.25rem;
+            font-weight: 850;
+            margin: 0;
+            line-height: 1.12;
+        }
+
+        .profuturo-subtitle {
+            font-size: 1.02rem;
+            line-height: 1.55;
+            max-width: 1020px;
+            margin-top: 12px;
+            color: rgba(255,255,255,0.93);
+        }
+
+        .profuturo-pill {
+            display: inline-block;
+            background: rgba(246, 178, 33, 0.16);
+            color: #FFE09A;
+            border: 1px solid rgba(246, 178, 33, 0.42);
+            padding: 5px 11px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 800;
+            margin-top: 14px;
+            margin-right: 8px;
+        }
+
+        .profuturo-card {
+            background: #FFFFFF;
+            border: 1px solid rgba(0, 75, 141, 0.12);
+            border-radius: 18px;
+            padding: 16px 18px;
+            box-shadow: 0 8px 22px rgba(0, 43, 92, 0.07);
+            margin-bottom: 14px;
+        }
+
+        .suggested-question {
+            background: #FFFFFF;
+            border: 1px solid rgba(0, 75, 141, 0.18);
+            border-radius: 14px;
+            padding: 12px;
+            margin-bottom: 8px;
+        }
+
+        section[data-testid="stSidebar"] {
+            border-right: 1px solid rgba(246, 178, 33, 0.24);
+        }
+
+        div[data-testid="stChatMessage"] {
+            border-radius: 18px;
+        }
+
+        .stButton > button {
+            border-radius: 999px;
+            border: 1px solid rgba(246, 178, 33, 0.65);
+            background-color: rgba(246, 178, 33, 0.05);
+        }
+
+        .stButton > button:hover {
+            border: 1px solid #F6B221;
+            background-color: rgba(246, 178, 33, 0.14);
+        }
+
+        .stDownloadButton > button {
+            border-radius: 999px;
+            border: 1px solid rgba(0, 75, 141, 0.35);
+        }
+
+        div[data-testid="stExpander"] {
+            border-radius: 14px;
+            border: 1px solid rgba(0, 75, 141, 0.14);
+        }
+
+        div[data-testid="stMetric"] {
+            background: #FFFFFF;
+            border: 1px solid rgba(0, 75, 141, 0.14);
+            border-radius: 16px;
+            padding: 14px 16px;
+            box-shadow: 0 8px 18px rgba(0, 43, 92, 0.06);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_profuturo_header():
+    """
+    Renderiza el header principal de la app.
+    """
+    st.markdown(
+        """
+        <div class="profuturo-header">
+            <div class="profuturo-eyebrow">Profuturo · Inteligencia de datos</div>
+            <h1 class="profuturo-title">Asistente de Traspasos AFORE</h1>
+            <div class="profuturo-subtitle">
+                Consulta información de traspasos mediante lenguaje natural.
+                El asistente interpreta preguntas de negocio, consulta Databricks Genie
+                y presenta respuestas con contexto analítico, tablas y visualizaciones.
+            </div>
+            <span class="profuturo-pill">Genie AI</span>
+            <span class="profuturo-pill">Traspasos AFORE</span>
+            <span class="profuturo-pill">Análisis conversacional</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 
 # ------------------------------------------------------------
@@ -86,6 +288,12 @@ def init_session_state():
     if "last_raw_response" not in st.session_state:
         st.session_state.last_raw_response = None
 
+    if "pending_prompt" not in st.session_state:
+        st.session_state.pending_prompt = None
+
+    if "feedback" not in st.session_state:
+        st.session_state.feedback = {}
+
 
 def reset_chat():
     """
@@ -95,6 +303,8 @@ def reset_chat():
     st.session_state.messages = []
     st.session_state.conversation_id = None
     st.session_state.last_raw_response = None
+    st.session_state.pending_prompt = None
+    st.session_state.feedback = {}
 
 
 def normalize_host(host: str) -> str:
@@ -143,6 +353,9 @@ def to_dict(obj):
     if isinstance(obj, (list, tuple)):
         return [to_dict(x) for x in obj]
 
+    if isinstance(obj, pd.DataFrame):
+        return obj.to_dict(orient="records")
+
     if hasattr(obj, "as_dict"):
         try:
             return obj.as_dict()
@@ -167,8 +380,8 @@ def build_genie_prompt(user_prompt: str, deep_thinking: bool) -> str:
         Envía la pregunta casi tal cual.
 
     Deep thinking:
-        No activa Agent Mode real, pero guía a Genie para responder con
-        más estructura, validación y razonamiento analítico.
+        No activa Agent Mode real, pero guía a Genie para responder apoyándose
+        en instrucciones, SQL Expressions y SQL Queries validadas del Space.
     """
     if not deep_thinking:
         return user_prompt
@@ -195,7 +408,6 @@ Entrega la respuesta en formato ejecutivo:
 - Después incluye una breve interpretación.
 - Si aplica, menciona cualquier supuesto usado.
 - Si aplica, devuelve una tabla que facilite la visualización en Streamlit.
-- Si aplica, agrega la visualización (gráfica) de la respuesta a la pregunta.
 
 Pregunta del usuario:
 {user_prompt}
@@ -391,13 +603,13 @@ def prepare_dataframe_for_charts(df: pd.DataFrame) -> pd.DataFrame:
     Prepara el DataFrame para graficar:
     - limpia nombres de columnas;
     - convierte columnas numéricas aunque vengan como texto/string/decimal;
-    - convierte fechas ISO como 2025-03-01T00:00:00.000Z;
+    - convierte fechas ISO;
     - crea una columna temporal si detecta año + mes.
     """
     df_chart = df.copy()
     df_chart.columns = [str(col).strip() for col in df_chart.columns]
 
-    # 1. Intentar convertir columnas tipo fecha.
+    # Intentar convertir columnas tipo fecha.
     for col in df_chart.columns:
         norm = normalize_text(col)
 
@@ -411,7 +623,7 @@ def prepare_dataframe_for_charts(df: pd.DataFrame) -> pd.DataFrame:
             if len(df_chart) > 0 and parsed_dates.notna().mean() >= 0.50:
                 df_chart[col] = parsed_dates.dt.tz_convert(None)
 
-    # 2. Intentar convertir cualquier columna no-fecha a numérica.
+    # Intentar convertir cualquier columna no-fecha a numérica.
     for col in df_chart.columns:
         if pd.api.types.is_datetime64_any_dtype(df_chart[col]):
             continue
@@ -434,7 +646,7 @@ def prepare_dataframe_for_charts(df: pd.DataFrame) -> pd.DataFrame:
         if len(df_chart) > 0 and numeric.notna().mean() >= 0.70:
             df_chart[col] = numeric
 
-    # 3. Detectar columnas de año y mes para crear periodo graficable.
+    # Detectar columnas de año y mes para crear periodo graficable.
     normalized_cols = {
         col: normalize_text(col)
         for col in df_chart.columns
@@ -615,9 +827,12 @@ def choose_category_column(
         "origen",
         "afore",
         "administradora",
+        "instituto",
         "grupo",
         "categoria",
-        "segmento"
+        "segmento",
+        "zona",
+        "canal"
     ]
 
     valid_cols = [
@@ -681,18 +896,27 @@ def sort_for_chart(df: pd.DataFrame, x_col: str) -> pd.DataFrame:
 
 def style_plotly_figure(fig, title: str):
     """
-    Aplica estilo visual consistente a las gráficas.
+    Aplica estilo visual Profuturo a las gráficas.
     """
     fig.update_layout(
         title={
             "text": title,
             "x": 0.02,
-            "xanchor": "left"
+            "xanchor": "left",
+            "font": {
+                "size": 20,
+                "color": PROFUTURO_COLORS["dark_blue"]
+            }
         },
         template="plotly_white",
         height=460,
         margin=dict(l=20, r=20, t=70, b=40),
-        font=dict(size=13),
+        font=dict(
+            size=13,
+            color=PROFUTURO_COLORS["text"]
+        ),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -706,13 +930,19 @@ def style_plotly_figure(fig, title: str):
     fig.update_xaxes(
         showgrid=True,
         gridwidth=1,
-        gridcolor="rgba(0,0,0,0.08)"
+        gridcolor="rgba(0, 75, 141, 0.10)",
+        zeroline=False,
+        title_font=dict(color=PROFUTURO_COLORS["dark_blue"]),
+        tickfont=dict(color="#374151")
     )
 
     fig.update_yaxes(
         showgrid=True,
         gridwidth=1,
-        gridcolor="rgba(0,0,0,0.08)"
+        gridcolor="rgba(0, 75, 141, 0.10)",
+        zeroline=False,
+        title_font=dict(color=PROFUTURO_COLORS["dark_blue"]),
+        tickfont=dict(color="#374151")
     )
 
     return fig
@@ -741,7 +971,7 @@ def render_kpi_cards(df: pd.DataFrame, numeric_cols: list[str]):
             )
 
 
-def render_heatmap_if_possible(df: pd.DataFrame, value_col: str):
+def render_heatmap_if_possible(df: pd.DataFrame, value_col: str, chart_key: str):
     """
     Genera heatmap cuando detecta un cruce tipo origen/destino.
     """
@@ -783,6 +1013,12 @@ def render_heatmap_if_possible(df: pd.DataFrame, value_col: str):
         pivot,
         text_auto=True,
         aspect="auto",
+        color_continuous_scale=[
+            "#F7F9FC",
+            PROFUTURO_COLORS["light_blue"],
+            PROFUTURO_COLORS["blue"],
+            PROFUTURO_COLORS["dark_blue"]
+        ],
         labels=dict(
             x=prettify_label(destination_col),
             y=prettify_label(origin_col),
@@ -796,12 +1032,12 @@ def render_heatmap_if_possible(df: pd.DataFrame, value_col: str):
     )
 
     st.subheader("Visualización")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=f"heatmap_{chart_key}")
 
     return True
 
 
-def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
+def render_smart_visualization(df: pd.DataFrame, chart_key: str):
     """
     Genera una visualización automática según la estructura de la tabla.
 
@@ -832,8 +1068,7 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
         render_kpi_cards(df_chart, numeric_cols)
         return
 
-    # Heatmap para cruces origen/destino.
-    if render_heatmap_if_possible(df_chart, value_col):
+    if render_heatmap_if_possible(df_chart, value_col, chart_key):
         return
 
     # Tendencia temporal.
@@ -846,7 +1081,7 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
             if 1 < unique_count <= 12:
                 if any(
                     keyword in normalize_text(col)
-                    for keyword in ["afore", "origen", "destino", "grupo", "categoria"]
+                    for keyword in ["afore", "origen", "destino", "grupo", "categoria", "instituto"]
                 ):
                     color_col = col
                     break
@@ -867,8 +1102,11 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
             y=value_col,
             color=color_col,
             markers=True,
-            labels=labels
+            labels=labels,
+            color_discrete_sequence=PROFUTURO_COLOR_SEQUENCE
         )
+
+        fig.update_traces(line=dict(width=3), marker=dict(size=8))
 
         fig = style_plotly_figure(
             fig,
@@ -876,7 +1114,7 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
         )
 
         st.subheader("Visualización")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=f"line_{chart_key}")
         return
 
     # Dona para participaciones o porcentajes.
@@ -898,7 +1136,8 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
                 labels={
                     category_col: prettify_label(category_col),
                     value_col: prettify_label(value_col)
-                }
+                },
+                color_discrete_sequence=PROFUTURO_COLOR_SEQUENCE
             )
 
             fig = style_plotly_figure(
@@ -912,7 +1151,7 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
             )
 
             st.subheader("Visualización")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"pie_{chart_key}")
             return
 
         # Barras horizontales para rankings o categorías.
@@ -936,13 +1175,15 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
             labels={
                 category_col: prettify_label(category_col),
                 value_col: prettify_label(value_col)
-            }
+            },
+            color_discrete_sequence=[PROFUTURO_COLORS["blue"]]
         )
 
         fig.update_traces(
             texttemplate="%{text:,.0f}",
             textposition="outside",
-            cliponaxis=False
+            cliponaxis=False,
+            marker_line_width=0
         )
 
         fig = style_plotly_figure(
@@ -951,7 +1192,7 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
         )
 
         st.subheader("Visualización")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=f"bar_{chart_key}")
         return
 
     # Scatter cuando hay dos métricas numéricas.
@@ -967,7 +1208,8 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
             labels={
                 x_col: prettify_label(x_col),
                 y_col: prettify_label(y_col)
-            }
+            },
+            color_discrete_sequence=PROFUTURO_COLOR_SEQUENCE
         )
 
         fig = style_plotly_figure(
@@ -976,7 +1218,7 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
         )
 
         st.subheader("Visualización")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=f"scatter_{chart_key}")
         return
 
     # Fallback: histograma.
@@ -985,7 +1227,8 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
         x=value_col,
         labels={
             value_col: prettify_label(value_col)
-        }
+        },
+        color_discrete_sequence=[PROFUTURO_COLORS["blue"]]
     )
 
     fig = style_plotly_figure(
@@ -994,7 +1237,7 @@ def render_smart_visualization(df: pd.DataFrame, chart_index: int = 1):
     )
 
     st.subheader("Visualización")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=f"hist_{chart_key}")
 
 
 # ------------------------------------------------------------
@@ -1082,31 +1325,154 @@ def ask_genie(
 
 
 # ------------------------------------------------------------
+# RENDER DE RESPUESTAS COMPLETAS
+# ------------------------------------------------------------
+
+def render_feedback_controls(message_id: str):
+    """
+    Renderiza controles de feedback simple por respuesta.
+    El feedback se conserva en session_state durante la sesión.
+    """
+    current_feedback = st.session_state.feedback.get(message_id)
+
+    c1, c2, c3 = st.columns([1, 1, 6])
+
+    with c1:
+        if st.button("👍", key=f"thumbs_up_{message_id}", help="Marcar respuesta como correcta"):
+            st.session_state.feedback[message_id] = "correcta"
+            st.rerun()
+
+    with c2:
+        if st.button("👎", key=f"thumbs_down_{message_id}", help="Marcar respuesta como incorrecta"):
+            st.session_state.feedback[message_id] = "incorrecta"
+            st.rerun()
+
+    with c3:
+        if current_feedback:
+            st.caption(f"Feedback registrado: **{current_feedback}**")
+
+
+def render_assistant_artifacts(
+    message: dict,
+    message_index: int,
+    show_charts: bool,
+    show_sql: bool,
+    show_debug: bool
+):
+    """
+    Renderiza todos los elementos asociados a una respuesta del asistente:
+    gráficas, tablas, CSV, SQL y respuesta cruda.
+    Esto permite que las respuestas anteriores no pierdan sus visualizaciones.
+    """
+    message_id = message.get("id", f"msg_{message_index}")
+
+    dataframes = message.get("dataframes", []) or []
+
+    if dataframes:
+        for df_idx, df in enumerate(dataframes, start=1):
+            chart_key = f"{message_id}_{df_idx}"
+
+            if show_charts:
+                render_smart_visualization(
+                    df,
+                    chart_key=chart_key
+                )
+
+            with st.expander(f"Ver tabla de resultados {df_idx}", expanded=False):
+                st.caption(f"{len(df):,} filas · {len(df.columns):,} columnas")
+                st.dataframe(df, use_container_width=True)
+
+                csv = df.to_csv(index=False).encode("utf-8")
+
+                st.download_button(
+                    label=f"Descargar resultado {df_idx} en CSV",
+                    data=csv,
+                    file_name=f"resultado_genie_{message_id}_{df_idx}.csv",
+                    mime="text/csv",
+                    key=f"download_{message_id}_{df_idx}"
+                )
+
+    if show_sql and message.get("sql"):
+        with st.expander("SQL generado por Genie"):
+            for sql_idx, sql in enumerate(message["sql"], start=1):
+                st.code(sql, language="sql")
+
+    if show_debug and message.get("raw"):
+        with st.expander("Respuesta cruda de Genie"):
+            st.json(message["raw"])
+
+    if message.get("role") == "assistant" and message_id != "welcome":
+        render_feedback_controls(message_id)
+
+
+def build_conversation_export() -> str:
+    """
+    Construye una exportación de la conversación en formato Markdown.
+    Incluye preguntas, respuestas, SQL y resumen de tablas.
+    """
+    lines = []
+    lines.append("# Conversación - Asistente de Traspasos AFORE")
+    lines.append("")
+    lines.append(f"Fecha de exportación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+
+    for idx, message in enumerate(st.session_state.messages, start=1):
+        role = message.get("role", "unknown")
+        content = message.get("content", "")
+
+        if role == "user":
+            lines.append(f"## Pregunta {idx}")
+            lines.append(content)
+            lines.append("")
+
+        elif role == "assistant":
+            lines.append(f"## Respuesta {idx}")
+            lines.append(content)
+            lines.append("")
+
+            dataframes = message.get("dataframes", []) or []
+            if dataframes:
+                lines.append("### Tablas devueltas")
+                for df_idx, df in enumerate(dataframes, start=1):
+                    lines.append(f"- Tabla {df_idx}: {len(df):,} filas · {len(df.columns):,} columnas")
+                lines.append("")
+
+            sql_queries = message.get("sql", []) or []
+            if sql_queries:
+                lines.append("### SQL generado")
+                for sql_idx, sql in enumerate(sql_queries, start=1):
+                    lines.append(f"```sql\n{sql}\n```")
+                lines.append("")
+
+            feedback_value = st.session_state.feedback.get(message.get("id"))
+            if feedback_value:
+                lines.append(f"Feedback: {feedback_value}")
+                lines.append("")
+
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------
 # INTERFAZ
 # ------------------------------------------------------------
 
+inject_profuturo_theme()
 init_session_state()
 databricks_config = load_databricks_config()
 
-st.title("💬 Asistente de Traspasos AFORE")
-
-st.write(
-    "Consulta información de traspasos AFORE mediante lenguaje natural. "
-    "Puedes hacer preguntas sobre periodos, AFORE origen, AFORE destino, "
-    "comparativos, tendencias mensuales, rankings y validaciones generales "
-    "sin entrar directamente a Databricks."
-)
-
 with st.sidebar:
-    st.header("Opciones")
+    if os.path.exists(LOGO_PATH):
+        st.image(LOGO_PATH, width=132)
+
+    st.markdown("### Centro de control")
+    st.caption("Configura cómo quieres consultar y visualizar la información.")
 
     deep_thinking = st.toggle(
         "Deep thinking",
         value=True,
         help=(
-            "No activa el Agent Mode real de Genie, pero envía una instrucción "
-            "más completa para buscar respuestas con mayor estructura, validación "
-            "e interpretación."
+            "No activa el Agent Mode real de Genie, pero guía a Genie para apoyarse "
+            "en instrucciones, SQL Expressions y SQL Queries validadas."
         )
     )
 
@@ -1140,7 +1506,33 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button("Reiniciar conversación"):
+    st.markdown("### Preguntas sugeridas")
+
+    suggested_questions = [
+        "¿Cuántos traspasos recibió Profuturo en 2025 por mes?",
+        "¿Qué AFORE recibió más traspasos durante 2025?",
+        "¿Cuáles fueron las principales AFORE origen hacia Profuturo en 2025?",
+        "¿Cuál fue la participación de Profuturo en los traspasos recibidos de 2025?",
+        "Compara los traspasos de Profuturo entre 2024 y 2025."
+    ]
+
+    for i, question in enumerate(suggested_questions, start=1):
+        if st.button(question, key=f"suggested_question_{i}"):
+            st.session_state.pending_prompt = question
+            st.rerun()
+
+    st.divider()
+
+    export_text = build_conversation_export()
+    st.download_button(
+        label="Descargar conversación",
+        data=export_text.encode("utf-8"),
+        file_name="conversacion_traspasos_afore.md",
+        mime="text/markdown",
+        use_container_width=True
+    )
+
+    if st.button("Nueva conversación", use_container_width=True):
         reset_chat()
         st.rerun()
 
@@ -1149,24 +1541,29 @@ with st.sidebar:
     )
 
 
+render_profuturo_header()
+
+
 # ------------------------------------------------------------
 # MENSAJE INICIAL
 # ------------------------------------------------------------
 
 if len(st.session_state.messages) == 0:
     st.session_state.messages.append({
+        "id": "welcome",
         "role": "assistant",
         "content": (
-            "Hola. Soy un asistente para consultar información de **traspasos AFORE**.\n\n"
-            "Puedo ayudarte a responder preguntas como:\n\n"
-            "- ¿Cuántos traspasos tuvo Profuturo en 2025 por mes?\n"
-            "- ¿Qué AFORE recibió más traspasos durante 2025?\n"
-            "- ¿Cuáles fueron las principales AFORE origen hacia Profuturo?\n"
-            "- ¿Cómo se comparan los traspasos entre dos periodos?\n"
-            "- ¿Cuál fue la tendencia mensual de traspasos por AFORE destino?\n"
-            "- ¿Qué AFORE tuvo mayor participación en los traspasos recibidos?\n\n"
-            "Cuando la respuesta incluya datos tabulares, también intentaré generar una visualización automática para facilitar el análisis."
-        )
+            "Hola. Soy el asistente conversacional de análisis de **traspasos AFORE** de Profuturo.\n\n"
+            "Puedo ayudarte a consultar información sobre traspasos recibidos, traspasos cedidos, "
+            "participación, comparativos mensuales, comportamiento por AFORE, origen/destino y "
+            "tendencias del mercado.\n\n"
+            "Cuando la respuesta incluya datos estructurados, generaré tablas y visualizaciones "
+            "automáticas para facilitar el análisis."
+        ),
+        "dataframes": [],
+        "sql": [],
+        "raw": {},
+        "created_at": datetime.now().isoformat()
     })
 
 
@@ -1174,22 +1571,41 @@ if len(st.session_state.messages) == 0:
 # HISTORIAL DE CHAT
 # ------------------------------------------------------------
 
-for message in st.session_state.messages:
+for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+
+        if message["role"] == "assistant":
+            render_assistant_artifacts(
+                message=message,
+                message_index=idx,
+                show_charts=show_charts,
+                show_sql=show_sql,
+                show_debug=show_debug
+            )
 
 
 # ------------------------------------------------------------
 # INPUT DEL USUARIO
 # ------------------------------------------------------------
 
-prompt = st.chat_input("Pregunta algo sobre traspasos...")
+typed_prompt = st.chat_input("Pregunta algo sobre traspasos...")
+
+prompt = typed_prompt
+
+if st.session_state.pending_prompt:
+    prompt = st.session_state.pending_prompt
+    st.session_state.pending_prompt = None
 
 if prompt:
-    st.session_state.messages.append({
+    user_message = {
+        "id": str(uuid.uuid4()),
         "role": "user",
-        "content": prompt
-    })
+        "content": prompt,
+        "created_at": datetime.now().isoformat()
+    }
+
+    st.session_state.messages.append(user_message)
 
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -1217,38 +1633,29 @@ if prompt:
                 )
 
             assistant_text = result["text"]
+
+            assistant_message = {
+                "id": str(uuid.uuid4()),
+                "role": "assistant",
+                "content": assistant_text,
+                "dataframes": result.get("dataframes", []),
+                "sql": result.get("sql", []),
+                "raw": result.get("raw", {}),
+                "deep_thinking": deep_thinking,
+                "created_at": datetime.now().isoformat()
+            }
+
             st.markdown(assistant_text)
 
-            if result["dataframes"]:
-                for idx, df in enumerate(result["dataframes"], start=1):
+            render_assistant_artifacts(
+                message=assistant_message,
+                message_index=len(st.session_state.messages),
+                show_charts=show_charts,
+                show_sql=show_sql,
+                show_debug=show_debug
+            )
 
-                    if show_charts:
-                        render_smart_visualization(df, chart_index=idx)
-
-                    with st.expander(f"Ver tabla de resultados {idx}", expanded=True):
-                        st.dataframe(df, use_container_width=True)
-
-                        csv = df.to_csv(index=False).encode("utf-8")
-                        st.download_button(
-                            label=f"Descargar resultado {idx} en CSV",
-                            data=csv,
-                            file_name=f"resultado_genie_{idx}.csv",
-                            mime="text/csv"
-                        )
-
-            if show_sql and result["sql"]:
-                with st.expander("SQL generado por Genie"):
-                    for idx, sql in enumerate(result["sql"], start=1):
-                        st.code(sql, language="sql")
-
-            if show_debug:
-                with st.expander("Respuesta cruda de Genie"):
-                    st.json(result["raw"])
-
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": assistant_text
-            })
+            st.session_state.messages.append(assistant_message)
 
         except Exception as e:
             error_text = str(e)
@@ -1257,6 +1664,18 @@ if prompt:
                 error_message = (
                     "La pregunta sí llegó a Genie, pero el SQL Warehouse no quedó listo a tiempo. "
                     "Revisa que el warehouse asignado al Genie Space esté encendido y disponible.\n\n"
+                    f"Detalle técnico: `{e}`"
+                )
+            elif "PERMISSION" in error_text.upper() or "FORBIDDEN" in error_text.upper():
+                error_message = (
+                    "No pude completar la consulta porque parece haber un problema de permisos. "
+                    "Revisa el acceso al Genie Space, SQL Warehouse o tablas utilizadas.\n\n"
+                    f"Detalle técnico: `{e}`"
+                )
+            elif "TIMEOUT" in error_text.upper() or "TIMED OUT" in error_text.upper():
+                error_message = (
+                    "La consulta tardó más de lo esperado. Intenta reformular la pregunta o validar "
+                    "que el SQL Warehouse esté disponible.\n\n"
                     f"Detalle técnico: `{e}`"
                 )
             else:
@@ -1268,7 +1687,15 @@ if prompt:
 
             st.error(error_message)
 
-            st.session_state.messages.append({
+            assistant_error_message = {
+                "id": str(uuid.uuid4()),
                 "role": "assistant",
-                "content": error_message
-            })
+                "content": error_message,
+                "dataframes": [],
+                "sql": [],
+                "raw": {},
+                "deep_thinking": deep_thinking,
+                "created_at": datetime.now().isoformat()
+            }
+
+            st.session_state.messages.append(assistant_error_message)
