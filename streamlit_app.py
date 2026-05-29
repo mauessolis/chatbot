@@ -26,7 +26,8 @@ st.set_page_config(
 # CONSTANTES VISUALES PROFUTURO
 # ------------------------------------------------------------
 
-LOGO_PATH = "assets/profuturo_logo.png"
+LOGO_PATH = "assets/profuturo_logo_horizontal.png"
+ICON_PATH = "assets/profuturo_logo.png"
 
 PROFUTURO_COLORS = {
     "blue": "#004B8D",
@@ -55,12 +56,21 @@ PROFUTURO_COLOR_SEQUENCE = [
 # LOGO STREAMLIT
 # ------------------------------------------------------------
 
-if os.path.exists(LOGO_PATH):
+if os.path.exists(LOGO_PATH) and os.path.exists(ICON_PATH):
     try:
         st.logo(
             LOGO_PATH,
             size="large",
-            icon_image=LOGO_PATH
+            icon_image=ICON_PATH
+        )
+    except Exception:
+        pass
+elif os.path.exists(ICON_PATH):
+    try:
+        st.logo(
+            ICON_PATH,
+            size="large",
+            icon_image=ICON_PATH
         )
     except Exception:
         pass
