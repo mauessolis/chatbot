@@ -1,7 +1,6 @@
 import os
 import re
 import uuid
-import json
 import unicodedata
 import pandas as pd
 import streamlit as st
@@ -26,7 +25,7 @@ st.set_page_config(
 # CONSTANTES VISUALES PROFUTURO
 # ------------------------------------------------------------
 
-LOGO_PATH = "assets/profuturo_horizontal_logo.png"
+LOGO_PATH = "assets/profuturo_logo_horizontal.png"
 ICON_PATH = "assets/profuturo_logo.png"
 
 PROFUTURO_COLORS = {
@@ -50,6 +49,25 @@ PROFUTURO_COLOR_SEQUENCE = [
     PROFUTURO_COLORS["dark_blue"],
     PROFUTURO_COLORS["gray"]
 ]
+
+
+# ------------------------------------------------------------
+# CATÁLOGO AFORE
+# ------------------------------------------------------------
+# Ajusta este catálogo si internamente manejan algún nombre oficial distinto.
+
+AFORE_CODE_MAP = {
+    "552": "Banamex",
+    "568": "Profuturo",
+    "556": "Coppel",
+    "594": "Azteca",
+    "578": "SURA",
+    "602": "Inbursa",
+    "607": "Principal",
+    "586": "PensionISSSTE",
+    "617": "XXI Banorte",
+    "530": "Citibanamex"
+}
 
 
 # ------------------------------------------------------------
@@ -156,14 +174,6 @@ def inject_profuturo_theme():
             padding: 16px 18px;
             box-shadow: 0 8px 22px rgba(0, 43, 92, 0.07);
             margin-bottom: 14px;
-        }
-
-        .suggested-question {
-            background: #FFFFFF;
-            border: 1px solid rgba(0, 75, 141, 0.18);
-            border-radius: 14px;
-            padding: 12px;
-            margin-bottom: 8px;
         }
 
         section[data-testid="stSidebar"] {
@@ -382,6 +392,477 @@ def to_dict(obj):
     return str(obj)
 
 
+def normalize_text(text: str) -> str:
+    """
+    Normaliza texto para detectar columnas aunque tengan acentos,
+    mayúsculas o variaciones de nombre.
+    """
+    text = str(text).strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return text
+
+
+def prettify_label(label: str) -> str:
+    """
+    Convierte nombres técnicos de columnas en etiquetas más legibles.
+    """
+    label = str(label).replace("_", " ").strip()
+    label = re.sub(r"\s+", " ", label)
+    return label.title()
+
+
+def format_number(value) -> str:
+    """
+    Da formato ejecutivo a valores numéricos.
+    """
+    try:
+        value = float(value)
+
+        if abs(value) >= 1_000_000:
+            return f"{value:,.0f}"
+
+        if abs(value) >= 1_000:
+            return f"{value:,.0f}"
+
+        if value.is_integer():
+            return f"{value:,.0f}"
+
+        return f"{value:,.2f}"
+
+    except Exception:
+        return str(value)
+
+
+# ------------------------------------------------------------
+# MAPEO Y FORMATO PARA USUARIO FINAL
+# ------------------------------------------------------------
+
+def normalize_afore_code(value):
+    """
+    Normaliza claves de AFORE para poder mapearlas aunque vengan como int, float o string.
+    """
+    if pd.isna(value):
+        return None
+
+    value_str = str(value).strip()
+
+    if value_str.endswith(".0"):
+        value_str = value_str[:-2]
+
+    return value_str
+
+
+def map_afore_code(value):
+    """
+    Convierte una clave AFORE en nombre legible.
+    Si no encuentra la clave, devuelve el valor original.
+    """
+    code = normalize_afore_code(value)
+
+    if code is None:
+        return value
+
+    return AFORE_CODE_MAP.get(code, code)
+
+
+def is_afore_code_column(col: str) -> bool:
+    """
+    Detecta columnas que representan claves de AFORE o instituto.
+    """
+    norm = normalize_text(col)
+
+    return norm in [
+        "cve_afore",
+        "cve afore",
+        "cveafore",
+        "cve_afore2",
+        "cve afore2",
+        "cveafore2",
+        "cve_instituto",
+        "cve instituto",
+        "cveinstituto",
+        "clave_afore",
+        "clave afore",
+        "clave_instituto",
+        "clave instituto"
+    ]
+
+
+def get_afore_display_column_name(col: str) -> str:
+    """
+    Renombra columnas de clave AFORE a nombres más entendibles.
+    """
+    norm = normalize_text(col)
+
+    if "afore2" in norm:
+        return "AFORE Relacionada"
+
+    if "instituto" in norm:
+        return "Instituto"
+
+    return "AFORE"
+
+
+def enrich_afore_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Agrega columnas legibles de AFORE cuando detecta columnas de clave.
+    Se usa para KPIs, tablas y gráficas.
+    """
+    if df is None or df.empty:
+        return df
+
+    df_enriched = df.copy()
+
+    for col in list(df_enriched.columns):
+        if is_afore_code_column(col):
+            new_col = get_afore_display_column_name(col)
+
+            # Evita sobreescribir si ya existe una columna con ese nombre.
+            if new_col in df_enriched.columns:
+                new_col = f"{new_col} Nombre"
+
+            df_enriched[new_col] = df_enriched[col].apply(map_afore_code)
+
+            ordered_cols = [new_col] + [c for c in df_enriched.columns if c != new_col]
+            df_enriched = df_enriched[ordered_cols]
+
+    return df_enriched
+
+
+def prettify_afore_text(text: str) -> str:
+    """
+    Mejora el texto de respuesta cuando Genie menciona claves AFORE.
+    Ejemplo: CVE_AFORE 552 (BANAMEX) -> Banamex (552)
+    """
+    if not text:
+        return text
+
+    enriched_text = text
+
+    for code, name in AFORE_CODE_MAP.items():
+        patterns = [
+            rf"\bCVE_AFORE\s*[:=]?\s*{code}(\s*\([^)]*\))?",
+            rf"\bCVE_INSTITUTO\s*[:=]?\s*{code}(\s*\([^)]*\))?",
+            rf"\bCVE AFORE\s*[:=]?\s*{code}(\s*\([^)]*\))?",
+            rf"\bCVE INSTITUTO\s*[:=]?\s*{code}(\s*\([^)]*\))?",
+            rf"\bclave\s*{code}(\s*\([^)]*\))?",
+            rf"\bClave\s*{code}(\s*\([^)]*\))?"
+        ]
+
+        for pattern in patterns:
+            enriched_text = re.sub(
+                pattern,
+                f"{name} ({code})",
+                enriched_text,
+                flags=re.IGNORECASE
+            )
+
+    return enriched_text
+
+
+def format_date_es(value, column_name: str = ""):
+    """
+    Formatea fechas de forma legible.
+    Para columnas tipo mes/periodo muestra 'Mar 2025'.
+    Para columnas tipo fecha muestra '01 Mar 2025'.
+    """
+    if pd.isna(value):
+        return ""
+
+    try:
+        date_value = pd.to_datetime(value, errors="coerce")
+
+        if pd.isna(date_value):
+            return value
+
+        month_names = {
+            1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr",
+            5: "May", 6: "Jun", 7: "Jul", 8: "Ago",
+            9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"
+        }
+
+        norm_col = normalize_text(column_name)
+        month = month_names.get(date_value.month, "")
+
+        if any(keyword in norm_col for keyword in ["mes", "periodo"]):
+            return f"{month} {date_value.year}"
+
+        return f"{date_value.day:02d} {month} {date_value.year}"
+
+    except Exception:
+        return value
+
+
+def is_month_number_column(series: pd.Series, column_name: str) -> bool:
+    """
+    Detecta columnas de mes numérico, para evitar tratarlas como fecha completa.
+    """
+    norm = normalize_text(column_name)
+
+    if norm not in ["mes", "month"]:
+        return False
+
+    numeric = pd.to_numeric(series, errors="coerce")
+
+    if len(series) == 0:
+        return False
+
+    return numeric.notna().mean() >= 0.70 and numeric.dropna().between(1, 12).all()
+
+
+def format_month_number(value):
+    """
+    Formatea un número de mes como nombre corto.
+    """
+    month_names = {
+        1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr",
+        5: "May", 6: "Jun", 7: "Jul", 8: "Ago",
+        9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"
+    }
+
+    try:
+        month = int(float(value))
+        return month_names.get(month, value)
+    except Exception:
+        return value
+
+
+def is_date_like_column(series: pd.Series, column_name: str) -> bool:
+    """
+    Detecta si una columna parece fecha.
+    """
+    if is_month_number_column(series, column_name):
+        return False
+
+    norm = normalize_text(column_name)
+
+    if any(keyword in norm for keyword in ["fecha", "periodo", "date"]):
+        parsed = pd.to_datetime(series, errors="coerce", utc=True)
+        return len(series) > 0 and parsed.notna().mean() >= 0.50
+
+    if "mes" in norm:
+        parsed = pd.to_datetime(series, errors="coerce", utc=True)
+        return len(series) > 0 and parsed.notna().mean() >= 0.50
+
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return True
+
+    return False
+
+
+def is_money_column(col: str) -> bool:
+    """
+    Detecta columnas de dinero/monto.
+    """
+    norm = normalize_text(col)
+
+    money_keywords = [
+        "monto",
+        "mdp",
+        "saldo",
+        "valor",
+        "importe",
+        "dinero"
+    ]
+
+    exclude_keywords = [
+        "porcentaje",
+        "participacion",
+        "part_",
+        "cuentas",
+        "traspasos"
+    ]
+
+    return (
+        any(keyword in norm for keyword in money_keywords)
+        and not any(keyword in norm for keyword in exclude_keywords)
+    )
+
+
+def is_percent_column(col: str) -> bool:
+    """
+    Detecta columnas de porcentaje/participación.
+    """
+    norm = normalize_text(col)
+
+    percent_keywords = [
+        "porcentaje",
+        "participacion",
+        "part_",
+        "part ",
+        "pct",
+        "share"
+    ]
+
+    return any(keyword in norm for keyword in percent_keywords)
+
+
+def is_count_column(col: str) -> bool:
+    """
+    Detecta columnas de conteo/cuentas/traspasos.
+    """
+    norm = normalize_text(col)
+
+    count_keywords = [
+        "cuentas",
+        "traspasos",
+        "conteo",
+        "cantidad",
+        "registros"
+    ]
+
+    return any(keyword in norm for keyword in count_keywords)
+
+
+def format_numeric_for_display(value, col: str):
+    """
+    Aplica formato visual según el tipo de métrica.
+    """
+    if pd.isna(value):
+        return ""
+
+    try:
+        number = float(value)
+    except Exception:
+        return value
+
+    if is_money_column(col):
+        return f"${number:,.2f}"
+
+    if is_percent_column(col):
+        if abs(number) <= 1:
+            number = number * 100
+
+        return f"{number:,.1f}%"
+
+    if is_count_column(col):
+        return f"{number:,.0f}"
+
+    if number.is_integer():
+        return f"{number:,.0f}"
+
+    return f"{number:,.2f}"
+
+
+def prettify_table_column_name(col: str) -> str:
+    """
+    Hace más legibles los encabezados de tabla.
+    """
+    custom_names = {
+        "total_traspasos": "Total Traspasos",
+        "total_cuentas": "Total Cuentas",
+        "total_cuentas_recibidas": "Total Cuentas Recibidas",
+        "total_monto": "Total Monto",
+        "participacion": "Participación",
+        "mes": "Mes",
+        "fecha": "Fecha",
+        "periodo": "Periodo",
+        "anio": "Año",
+        "ano": "Año",
+        "cve_afore": "Clave AFORE",
+        "cve_instituto": "Clave Instituto"
+    }
+
+    norm = normalize_text(col)
+
+    if norm in custom_names:
+        return custom_names[norm]
+
+    return prettify_label(col)
+
+
+def prepare_dataframe_for_display(df: pd.DataFrame, hide_technical_codes: bool = True) -> pd.DataFrame:
+    """
+    Prepara un DataFrame para mostrarlo al usuario final:
+    - convierte claves AFORE a nombres;
+    - limpia fechas;
+    - agrega comas a números;
+    - agrega $ a montos;
+    - agrega % a participaciones;
+    - renombra encabezados;
+    - oculta claves técnicas si aplica.
+    """
+    if df is None or df.empty:
+        return df
+
+    display_df = enrich_afore_columns(df)
+
+    # 1. Ocultar claves técnicas si aplica.
+    columns_to_drop = []
+
+    if hide_technical_codes:
+        for col in display_df.columns:
+            if is_afore_code_column(col):
+                columns_to_drop.append(col)
+
+    if columns_to_drop:
+        display_df = display_df.drop(columns=columns_to_drop, errors="ignore")
+
+    # 2. Formatear meses numéricos.
+    for col in list(display_df.columns):
+        if is_month_number_column(display_df[col], col):
+            display_df[col] = display_df[col].apply(format_month_number)
+
+    # 3. Formatear fechas.
+    for col in list(display_df.columns):
+        if is_date_like_column(display_df[col], col):
+            display_df[col] = display_df[col].apply(lambda x: format_date_es(x, col))
+
+    # 4. Formatear numéricos.
+    for col in list(display_df.columns):
+        if pd.api.types.is_numeric_dtype(display_df[col]):
+            display_df[col] = display_df[col].apply(lambda x: format_numeric_for_display(x, col))
+        else:
+            raw = display_df[col].astype(str).str.strip()
+
+            cleaned = (
+                raw
+                .str.replace("$", "", regex=False)
+                .str.replace(",", "", regex=False)
+                .str.replace("%", "", regex=False)
+                .str.replace(" ", "", regex=False)
+            )
+
+            numeric = pd.to_numeric(cleaned, errors="coerce")
+
+            if len(display_df) > 0 and numeric.notna().mean() >= 0.70:
+                display_df[col] = numeric.apply(lambda x: format_numeric_for_display(x, col))
+
+    # 5. Renombrar encabezados.
+    rename_map = {
+        col: prettify_table_column_name(col)
+        for col in display_df.columns
+    }
+
+    display_df = display_df.rename(columns=rename_map)
+
+    # 6. Reordenar columnas importantes al inicio.
+    priority_cols = [
+        col for col in display_df.columns
+        if normalize_text(col) in [
+            "afore",
+            "afore relacionada",
+            "instituto",
+            "afore nombre",
+            "instituto nombre"
+        ]
+    ]
+
+    other_cols = [
+        col for col in display_df.columns
+        if col not in priority_cols
+    ]
+
+    display_df = display_df[priority_cols + other_cols]
+
+    return display_df
+
+
+# ------------------------------------------------------------
+# PROMPT PARA GENIE
+# ------------------------------------------------------------
+
 def build_genie_prompt(user_prompt: str, deep_thinking: bool) -> str:
     """
     Construye el prompt que se enviará a Genie.
@@ -423,6 +904,10 @@ Pregunta del usuario:
 {user_prompt}
 """.strip()
 
+
+# ------------------------------------------------------------
+# EXTRACCIÓN DE RESPUESTA DE GENIE
+# ------------------------------------------------------------
 
 def extract_text_from_genie_response(response) -> str:
     """
@@ -566,48 +1051,6 @@ def extract_dataframe_from_query_result(query_result):
 # VISUALIZACIONES AUTOMÁTICAS
 # ------------------------------------------------------------
 
-def normalize_text(text: str) -> str:
-    """
-    Normaliza texto para detectar columnas aunque tengan acentos,
-    mayúsculas o variaciones de nombre.
-    """
-    text = str(text).strip().lower()
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(char for char in text if not unicodedata.combining(char))
-    return text
-
-
-def prettify_label(label: str) -> str:
-    """
-    Convierte nombres técnicos de columnas en etiquetas más legibles.
-    """
-    label = str(label).replace("_", " ").strip()
-    label = re.sub(r"\s+", " ", label)
-    return label.title()
-
-
-def format_number(value) -> str:
-    """
-    Da formato ejecutivo a valores numéricos.
-    """
-    try:
-        value = float(value)
-
-        if abs(value) >= 1_000_000:
-            return f"{value:,.0f}"
-
-        if abs(value) >= 1_000:
-            return f"{value:,.0f}"
-
-        if value.is_integer():
-            return f"{value:,.0f}"
-
-        return f"{value:,.2f}"
-
-    except Exception:
-        return str(value)
-
-
 def prepare_dataframe_for_charts(df: pd.DataFrame) -> pd.DataFrame:
     """
     Prepara el DataFrame para graficar:
@@ -616,12 +1059,15 @@ def prepare_dataframe_for_charts(df: pd.DataFrame) -> pd.DataFrame:
     - convierte fechas ISO;
     - crea una columna temporal si detecta año + mes.
     """
-    df_chart = df.copy()
+    df_chart = enrich_afore_columns(df)
     df_chart.columns = [str(col).strip() for col in df_chart.columns]
 
     # Intentar convertir columnas tipo fecha.
     for col in df_chart.columns:
         norm = normalize_text(col)
+
+        if is_month_number_column(df_chart[col], col):
+            continue
 
         if any(keyword in norm for keyword in ["fecha", "periodo", "mes", "date"]):
             parsed_dates = pd.to_datetime(
@@ -720,12 +1166,31 @@ def prepare_dataframe_for_charts(df: pd.DataFrame) -> pd.DataFrame:
 def get_numeric_columns(df: pd.DataFrame) -> list[str]:
     """
     Devuelve columnas numéricas útiles para graficar.
+    Excluye claves/códigos que no deben interpretarse como métricas.
     """
-    return [
-        col for col in df.columns
-        if pd.api.types.is_numeric_dtype(df[col])
-        and not str(col).startswith("_")
+    excluded_keywords = [
+        "cve",
+        "clave",
+        "id",
+        "codigo",
+        "code"
     ]
+
+    numeric_cols = []
+
+    for col in df.columns:
+        norm = normalize_text(col)
+
+        if str(col).startswith("_"):
+            continue
+
+        if any(keyword in norm for keyword in excluded_keywords):
+            continue
+
+        if pd.api.types.is_numeric_dtype(df[col]):
+            numeric_cols.append(col)
+
+    return numeric_cols
 
 
 def get_categorical_columns(df: pd.DataFrame) -> list[str]:
@@ -736,6 +1201,9 @@ def get_categorical_columns(df: pd.DataFrame) -> list[str]:
 
     for col in df.columns:
         if str(col).startswith("_"):
+            continue
+
+        if is_afore_code_column(col):
             continue
 
         if pd.api.types.is_numeric_dtype(df[col]):
@@ -766,6 +1234,9 @@ def find_time_column(df: pd.DataFrame):
     for col in df.columns:
         norm = normalize_text(col)
 
+        if is_month_number_column(df[col], col):
+            return col
+
         if any(keyword in norm for keyword in ["fecha", "periodo", "date", "mes"]):
             parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
 
@@ -777,9 +1248,6 @@ def find_time_column(df: pd.DataFrame):
         norm = normalize_text(col)
 
         if norm in ["anio", "ano", "year"] and pd.api.types.is_numeric_dtype(df[col]):
-            return col
-
-        if norm in ["mes", "month"] and pd.api.types.is_numeric_dtype(df[col]):
             return col
 
     return None
@@ -831,13 +1299,11 @@ def choose_category_column(
         return None
 
     priority_keywords = [
-        "afore_destino",
-        "destino",
-        "afore_origen",
-        "origen",
         "afore",
-        "administradora",
         "instituto",
+        "destino",
+        "origen",
+        "administradora",
         "grupo",
         "categoria",
         "segmento",
@@ -961,13 +1427,40 @@ def style_plotly_figure(fig, title: str):
 def render_kpi_cards(df: pd.DataFrame, numeric_cols: list[str]):
     """
     Muestra KPIs cuando la respuesta trae un solo registro.
+    Si existe una columna de AFORE legible, la muestra como contexto principal.
     """
+    if df is None or df.empty:
+        return
+
+    st.subheader("Resumen visual")
+
+    context_cols = [
+        col for col in df.columns
+        if normalize_text(col) in [
+            "afore",
+            "afore relacionada",
+            "instituto",
+            "afore nombre",
+            "instituto nombre"
+        ]
+    ]
+
+    if context_cols:
+        context_col = context_cols[0]
+        st.markdown(
+            f"""
+            <div class="profuturo-card">
+                <div style="font-size:0.9rem; color:#6B7280; font-weight:700;">{prettify_label(context_col)}</div>
+                <div style="font-size:2rem; color:#002B5C; font-weight:800;">{df.iloc[0][context_col]}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
     display_cols = numeric_cols[:4]
 
     if not display_cols:
         return
-
-    st.subheader("Resumen visual")
 
     cols = st.columns(len(display_cols))
 
@@ -975,9 +1468,19 @@ def render_kpi_cards(df: pd.DataFrame, numeric_cols: list[str]):
         value = df.iloc[0][metric_col]
 
         with cols[idx]:
+            if is_money_column(metric_col):
+                metric_value = f"${float(value):,.2f}"
+            elif is_percent_column(metric_col):
+                number = float(value)
+                if abs(number) <= 1:
+                    number = number * 100
+                metric_value = f"{number:,.1f}%"
+            else:
+                metric_value = format_number(value)
+
             st.metric(
                 label=prettify_label(metric_col),
-                value=format_number(value)
+                value=metric_value
             )
 
 
@@ -1050,15 +1553,6 @@ def render_heatmap_if_possible(df: pd.DataFrame, value_col: str, chart_key: str)
 def render_smart_visualization(df: pd.DataFrame, chart_key: str):
     """
     Genera una visualización automática según la estructura de la tabla.
-
-    Tipos soportados:
-    - KPIs
-    - línea temporal
-    - barras/ranking
-    - dona
-    - heatmap origen/destino
-    - scatter
-    - histograma
     """
     if df is None or df.empty:
         return
@@ -1318,7 +1812,7 @@ def ask_genie(
                 df = extract_dataframe_from_query_result(query_result)
 
                 if df is not None and not df.empty:
-                    dataframes.append(df)
+                    dataframes.append(enrich_afore_columns(df))
 
             except Exception as e:
                 if show_sql:
@@ -1389,18 +1883,41 @@ def render_assistant_artifacts(
                 )
 
             with st.expander(f"Ver tabla de resultados {df_idx}", expanded=False):
-                st.caption(f"{len(df):,} filas · {len(df.columns):,} columnas")
-                st.dataframe(df, use_container_width=True)
-
-                csv = df.to_csv(index=False).encode("utf-8")
-
-                st.download_button(
-                    label=f"Descargar resultado {df_idx} en CSV",
-                    data=csv,
-                    file_name=f"resultado_genie_{message_id}_{df_idx}.csv",
-                    mime="text/csv",
-                    key=f"download_{message_id}_{df_idx}"
+                display_df = prepare_dataframe_for_display(
+                    df,
+                    hide_technical_codes=True
                 )
+
+                st.caption(f"{len(df):,} filas · {len(display_df.columns):,} columnas visibles")
+
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                csv_original = df.to_csv(index=False).encode("utf-8")
+                csv_display = display_df.to_csv(index=False).encode("utf-8")
+
+                c1, c2 = st.columns(2)
+
+                with c1:
+                    st.download_button(
+                        label=f"Descargar datos originales {df_idx}",
+                        data=csv_original,
+                        file_name=f"resultado_original_{message_id}_{df_idx}.csv",
+                        mime="text/csv",
+                        key=f"download_original_{message_id}_{df_idx}"
+                    )
+
+                with c2:
+                    st.download_button(
+                        label=f"Descargar tabla formateada {df_idx}",
+                        data=csv_display,
+                        file_name=f"resultado_formateado_{message_id}_{df_idx}.csv",
+                        mime="text/csv",
+                        key=f"download_display_{message_id}_{df_idx}"
+                    )
 
     if show_sql and message.get("sql"):
         with st.expander("SQL generado por Genie"):
@@ -1444,7 +1961,7 @@ def build_conversation_export() -> str:
             if dataframes:
                 lines.append("### Tablas devueltas")
                 for df_idx, df in enumerate(dataframes, start=1):
-                    lines.append(f"- Tabla {df_idx}: {len(df):,} filas · {len(df.columns):,} columnas")
+                    lines.append(f"- Tabla {df_idx}: {len(df):,} filas · {len(df.columns):,} columnas originales")
                 lines.append("")
 
             sql_queries = message.get("sql", []) or []
@@ -1471,7 +1988,6 @@ init_session_state()
 databricks_config = load_databricks_config()
 
 with st.sidebar:
-
     st.markdown("### Centro de control")
     st.caption("Configura cómo quieres consultar y visualizar la información.")
 
@@ -1640,13 +2156,18 @@ if prompt:
                     show_sql=show_sql
                 )
 
-            assistant_text = result["text"]
+            assistant_text = prettify_afore_text(result["text"])
+
+            enriched_dataframes = [
+                enrich_afore_columns(df)
+                for df in result.get("dataframes", [])
+            ]
 
             assistant_message = {
                 "id": str(uuid.uuid4()),
                 "role": "assistant",
                 "content": assistant_text,
-                "dataframes": result.get("dataframes", []),
+                "dataframes": enriched_dataframes,
                 "sql": result.get("sql", []),
                 "raw": result.get("raw", {}),
                 "deep_thinking": deep_thinking,
